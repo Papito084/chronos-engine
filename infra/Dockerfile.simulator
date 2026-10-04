@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt pyproject.toml ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ENV SYMBOL=BTC-USDT \
+    INITIAL_PRICE=65000.0 \
+    GATEWAY_URL=http://gateway:8000 \
+    MODE=network \
+    MM_INTERVAL_MS=100 \
+    TAKER_RATE_PER_SEC=100 \
+    STRESS_BURST_INTERVAL_SEC=30
+
+CMD ["python", "-m", "simulator.main"]

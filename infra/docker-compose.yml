@@ -1,0 +1,163 @@
+version: '3.8'
+
+networks:
+  chronos-net:
+    name: chronos-net
+    driver: bridge
+
+services:
+  # Event Sourcing Bus (Redpanda - Kafka API v3 compatible high-throughput C++ engine)
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.11
+    container_name: chronos-redpanda
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 1G
+      - --overprovisioned
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr 0.0.0.0:8082
+      - --advertise-pandaproxy-addr redpanda:8082
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+      - "8082:8082"
+    networks:
+      - chronos-net
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  # Redpanda Web Console (Kafka UI & Event Stream Inspector)
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.5.2
+    container_name: chronos-redpanda-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - chronos-net
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_BROKERS=redpanda:29092
+      - KAFKA_SCHEMAREGISTRY_ENABLED=false
+
+  # Automatic Topic Provisioner for Market Commands and Events
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.11
+    container_name: chronos-redpanda-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - chronos-net
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Awaiting Redpanda broker readiness..."
+        rpk cluster info --brokers redpanda:29092
+        echo "Provisioning topics..."
+        # Tópico de comandos de mercado (particionado por símbolo, ej: BTC-USDT)
+        rpk topic create market.commands \
+          --brokers redpanda:29092 \
+          --partitions 4 \
+          --replicas 1 \
+          -c cleanup.policy=delete \
+          -c retention.ms=86400000 || true
+        # Tópico inmutable de eventos ordenados (OrderAccepted, OrderMatched, OrderCanceled)
+        rpk topic create market.events \
+          --brokers redpanda:29092 \
+          --partitions 1 \
+          --replicas 1 \
+          -c cleanup.policy=compact \
+          -c segment.ms=60000 || true
+        echo "Redpanda topics initialized successfully."
+        rpk topic list --brokers redpanda:29092
+
+  # Real-time OLAP Time-Series Store (ClickHouse)
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: chronos-clickhouse
+    networks:
+      - chronos-net
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      - CLICKHOUSE_DB=chronos
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes:
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  # Market Data Gateway & API
+  gateway:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.gateway
+    container_name: chronos-gateway
+    networks:
+      - chronos-net
+    ports:
+      - "8002:8000"
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:29092
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Market Simulator & Liquidity Bots
+  simulator:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.simulator
+    container_name: chronos-simulator
+    networks:
+      - chronos-net
+    environment:
+      - GATEWAY_URL=http://gateway:8000
+      - SYMBOL=BTC-USDT
+      - INITIAL_PRICE=65000.0
+      - MODE=network
+      - MM_INTERVAL_MS=100
+      - TAKER_RATE_PER_SEC=100
+      - STRESS_BURST_INTERVAL_SEC=30
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  # Frontend Trading Terminal (React 18 + Lightweight Charts + Nginx reverse proxy)
+  frontend:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.frontend
+    container_name: chronos-frontend
+    networks:
+      - chronos-net
+    ports:
+      - "3002:80"
+    depends_on:
+      gateway:
+        condition: service_healthy
