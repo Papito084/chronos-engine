@@ -2,8 +2,9 @@
 
 **ChronosEngine** es una plataforma distribuida de simulación de exchange de ultra-baja latencia y alto rendimiento financiero (HFT). Diseñada para operar con un **Order Matching Engine (L3) determinista en memoria**, **Event Sourcing**, persistencia analítica OLAP y una **terminal web de trading interactiva** en tiempo real.
 
----
+![ChronosEngine Trading Terminal Dashboard](assets/dashboard.png)
 
+---
 ## 🏛 Diagrama de Arquitectura Global
 
 ```mermaid
